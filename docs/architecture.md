@@ -32,7 +32,7 @@ phase records decisions (problem → options → tradeoffs → choice).
 1. **Core API + in-memory hash index** — `open/close/put/get/Delete` — **done**
 2. **Append-only persistence** — binary records; index holds file offsets — **done**
 3. **Integrity & recovery** — CRC32, log replay, fsync policy, crash tests — **done**
-4. **Compaction** — write-new-file → fsync → atomic rename
+4. **Compaction** — write-new-file → fsync → atomic rename — **done**
 5. **Concurrency** — single writer, multiple readers; stress tests
 6. **Ops** — configuration, ARM/QEMU, benchmarks
 
@@ -217,14 +217,67 @@ crash (and, as far as the OS allows, a power loss) does not silently lose a
 - Sync-on-every-write is slow; no group commit yet.
 - Header itself is not checksummed.
 - True power-loss tests need hardware/VM kill; we approximate with file surgery.
-- Compaction still absent (Phase 4).
-
 ### Interview prompts
 
 - Why is a bad CRC on the *last* record treated differently from mid-file?
 - What does `fsync` guarantee that `fflush` does not?
 - Why not use a cryptographic hash for records?
 - How would group commit change the failure model?
+
+---
+
+## Phase 4 — Compaction
+
+### Problem
+
+Append-only history accumulates garbage: superseded puts and delete tombstones.
+Disk grows without bound even if the live key set is small.
+
+### Options considered
+
+| Area | Option A | Option B | Option C |
+|------|----------|----------|----------|
+| When | Manual `compact()` only | Size/ratio thresholds | Background thread |
+| How | In-place squeeze | Write new file → fsync → rename | Multi-level LSM |
+| Live set source | Full log scan | In-memory index snapshot | Separate hint file |
+| Atomicity | Copy over in place | OS rename replace | Dual files + manifest |
+
+### Tradeoffs
+
+- **Manual compact**: simple, predictable, no background races (Phase 5 adds
+  concurrency later). Callers (or Phase 6 config) decide when to run.
+- **New file + rename**: classic crash-safe install; old file remains valid until
+  rename commits. Matches the project roadmap explicitly.
+- **Index snapshot**: O(live keys) reads of current values; no need to scan dead
+  history. Requires holding values in RAM during the rewrite (acceptable for
+  educational scale).
+- **LSM**: future complexity; out of scope.
+
+### Decision
+
+1. Public API: `Store::compact() -> CompactStats`.
+2. Write live puts only to `ekv.log.compact` (same v2 record format + CRC/fsync).
+3. Close live log → move aside `ekv.log` → `replace_file(compact, ekv.log)` →
+   drop backup → reopen and rebuild index.
+4. On `open`, cleanup:
+   - both `ekv.log` and `.compact` → delete abandoned `.compact`
+   - only `.compact` → promote to `ekv.log`
+   - leftover `.old` → delete
+5. Windows uses `MoveFileEx(REPLACE_EXISTING|WRITE_THROUGH)`; POSIX uses `rename`.
+
+### Assumptions & technical debt
+
+- Compaction is single-threaded and blocks the store (no readers during compact).
+- Live values are buffered in memory for the rewrite.
+- No automatic scheduling / space amplification trigger yet.
+- No multi-generation logs or leveled compaction.
+
+### Interview prompts
+
+- Why is rename considered the commit point of compaction?
+- What happens if we crash after writing `.compact` but before replacing `ekv.log`?
+- Why drop tombstones during compact?
+- How would you compact without buffering all values in RAM?
 
 ---
 
@@ -241,3 +294,5 @@ crash (and, as far as the OS allows, a power loss) does not silently lose a
 | 3 | Format v2 + trailing CRC-32 | Detect torn/corrupt records |
 | 3 | Sync every append | Strong educational durability default |
 | 3 | Tail truncate vs mid-file fail | Availability for crash tails; safety for deep damage |
+| 4 | Manual compact, new file + atomic replace | Crash-safe GC without LSM complexity |
+| 4 | Live set from hash index | O(live) rewrite; tombstones dropped |

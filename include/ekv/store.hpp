@@ -1,10 +1,12 @@
 #pragma once
 
 #include "ekv/append_log.hpp"
+#include "ekv/compaction.hpp"
 #include "ekv/error.hpp"
 #include "ekv/hash_index.hpp"
 #include "ekv/version.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -14,10 +16,9 @@ namespace ekv {
 
 // Embedded key-value store facade.
 //
-// Phase 2: put/Delete append binary records to a log under `path`; the hash
-// index maps keys to value offsets. open() replays the log to rebuild the
-// index. get() reads the value from the log. Old versions remain in the file
-// until Phase 4 compaction.
+// put/Delete append to ekv.log; the hash index maps keys to value offsets.
+// open() recovers the log and rebuilds the index. compact() rewrites only live
+// keys into a new file (write → fsync → atomic rename) to reclaim garbage.
 class Store {
  public:
   Store() = default;
@@ -29,6 +30,7 @@ class Store {
   Store& operator=(Store&&) noexcept;
 
   // Open the store at `path` (created if missing). Replays `ekv.log` if present.
+  // Cleans up interrupted compaction artifacts (.compact / .old).
   void open(const std::filesystem::path& path);
 
   // Flush and release resources. Safe to call multiple times.
@@ -50,12 +52,20 @@ class Store {
   // Appends a delete tombstone when the key existed.
   bool Delete(std::string_view key);
 
+  // Rewrite live keys only. Drops tombstones and superseded versions.
+  // Sequence: write ekv.log.compact → durable sync → replace ekv.log → reopen.
+  CompactStats compact();
+
   [[nodiscard]] std::size_t size() const;
   [[nodiscard]] bool empty() const;
+
+  // Current append-log logical size in bytes (for tests / metrics).
+  [[nodiscard]] std::uint64_t log_size_bytes() const;
 
  private:
   void ensure_open() const;
   void rebuild_index_from_log();
+  static void cleanup_compaction_artifacts(const std::filesystem::path& dir);
 
   bool open_ = false;
   std::filesystem::path path_;

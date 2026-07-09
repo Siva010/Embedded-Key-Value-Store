@@ -15,7 +15,7 @@ persistence, in-memory indexing, and careful durability semantics.
 | 1     | Core API + in-memory hash index            | Done    |
 | 2     | Append-only log + binary records           | Done    |
 | 3     | CRC32, recovery, fsync, crash tests        | Done    |
-| 4     | Compaction (write → fsync → atomic rename) | Planned |
+| 4     | Compaction (write → fsync → atomic rename) | Done    |
 | 5     | Single writer / multi-reader + stress      | Planned |
 | 6     | Config, ARM/QEMU, benchmarks               | Planned |
 
@@ -23,6 +23,10 @@ persistence, in-memory indexing, and careful durability semantics.
 `flush` + OS sync (`fsync` / `FlushFileBuffers`). Torn tails and a bad CRC on
 the last record are truncated on open; mid-file CRC failures raise
 `ErrorCode::Corruption`. **Breaking:** Phase 2 (v1) log files are not readable.
+
+**Phase 4 note:** `Store::compact()` rewrites live keys to `ekv.log.compact`,
+durably syncs, then atomically replaces `ekv.log` (tombstones and old versions
+dropped). Interrupted compact temps are cleaned or promoted on `open`.
 
 ## Requirements
 

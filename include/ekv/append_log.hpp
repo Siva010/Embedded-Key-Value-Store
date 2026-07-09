@@ -46,6 +46,9 @@ class AppendLog {
     return recovered_tail_bytes_;
   }
 
+  // Logical end offset (header + complete records); equals file size after trim.
+  [[nodiscard]] std::uint64_t size_bytes() const noexcept { return write_pos_; }
+
   RecordLocator append_put(std::string_view key, std::string_view value);
   void append_delete(std::string_view key);
 

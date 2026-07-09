@@ -13,4 +13,10 @@ void sync_path(const std::filesystem::path& path);
 // Important after creating/renaming files in a data directory (Phase 4).
 void sync_directory(const std::filesystem::path& dir);
 
+// Atomically (as far as the OS allows) replace `to` with `from`.
+// On POSIX this is rename(2); on Windows uses MoveFileEx REPLACE_EXISTING.
+// Both paths must be on the same filesystem. Throws Error(IoError) on failure.
+void replace_file(const std::filesystem::path& from,
+                  const std::filesystem::path& to);
+
 }  // namespace ekv

@@ -15,3 +15,8 @@ add_executable(ekv_recovery_test recovery_test.cpp)
 target_link_libraries(ekv_recovery_test PRIVATE ekv::ekv)
 ekv_apply_warnings(ekv_recovery_test)
 add_test(NAME ekv_recovery_test COMMAND ekv_recovery_test)
+
+add_executable(ekv_compaction_test compaction_test.cpp)
+target_link_libraries(ekv_compaction_test PRIVATE ekv::ekv)
+ekv_apply_warnings(ekv_compaction_test)
+add_test(NAME ekv_compaction_test COMMAND ekv_compaction_test)

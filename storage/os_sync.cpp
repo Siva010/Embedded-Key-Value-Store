@@ -67,4 +67,29 @@ void sync_directory(const fs::path& dir) {
 #endif
 }
 
+void replace_file(const fs::path& from, const fs::path& to) {
+#if defined(_WIN32)
+  const std::wstring wfrom = from.wstring();
+  const std::wstring wto = to.wstring();
+  // MOVEFILE_REPLACE_EXISTING: clobber destination.
+  // MOVEFILE_WRITE_THROUGH: do not return until the rename is on disk.
+  if (!MoveFileExW(wfrom.c_str(), wto.c_str(),
+                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    throw_io("MoveFileExW replace failed: " + from.string() + " -> " +
+             to.string());
+  }
+#else
+  std::error_code ec;
+  fs::rename(from, to, ec);
+  if (ec) {
+    throw_io("rename replace failed: " + from.string() + " -> " + to.string() +
+             ": " + ec.message());
+  }
+#endif
+  // Ensure the directory entry is durable where the platform supports it.
+  if (const auto parent = to.parent_path(); !parent.empty()) {
+    sync_directory(parent);
+  }
+}
+
 }  // namespace ekv
