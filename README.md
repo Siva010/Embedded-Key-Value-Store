@@ -13,15 +13,16 @@ persistence, in-memory indexing, and careful durability semantics.
 |-------|--------------------------------------------|---------|
 | 0     | Project scaffold, CMake, layout            | Done    |
 | 1     | Core API + in-memory hash index            | Done    |
-| 2     | Append-only log + binary records           | Planned |
+| 2     | Append-only log + binary records           | Done    |
 | 3     | CRC32, recovery, fsync, crash tests        | Planned |
 | 4     | Compaction (write → fsync → atomic rename) | Planned |
 | 5     | Single writer / multi-reader + stress      | Planned |
 | 6     | Config, ARM/QEMU, benchmarks               | Planned |
 
-**Phase 1 note:** `open`/`close`/`put`/`get`/`Delete` work entirely in memory.
-The data directory is created for later durability; restart loses data until
-Phase 2.
+**Phase 2 note:** Data is stored in `data/ekv.log` (append-only). The in-memory
+index maps keys → file offsets. `open` replays the log. Old versions of keys
+remain in the file until Phase 4 compaction. CRC32 / hard `fsync` policy land
+in Phase 3.
 
 ## Requirements
 
@@ -46,29 +47,30 @@ Optional flags:
 | `EKV_BUILD_EXAMPLES`| ON      | Example programs       |
 | `EKV_ENABLE_WARNINGS` | ON    | Strict warnings        |
 
-## Quick start (Phase 1 API)
+## Quick start
 
 ```cpp
 #include "ekv/store.hpp"
 
 ekv::Store db;
-db.open("data");
+db.open("data");          // creates data/ and data/ekv.log
 db.put("key", "value");
 if (auto v = db.get("key")) {
   // *v == "value"
 }
 db.Delete("key");
 db.close();
+// reopen later — put/delete history is replayed from ekv.log
 ```
 
 ## Layout
 
 ```text
-include/ekv/   Public headers (store, hash_index, error, version)
+include/ekv/   Public headers (store, hash_index, append_log, record, …)
 store/         Store facade
+storage/       Append-only log implementation
 index/         Reserved for index .cpp in later phases
-storage/       Append-only log (Phase 2+)
-wal/           WAL details (Phase 2–3)
+wal/           WAL details (optional split later)
 recovery/      Replay & integrity (Phase 3+)
 compaction/    Log compaction (Phase 4+)
 tests/         Unit, crash, stress tests

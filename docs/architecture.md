@@ -30,7 +30,7 @@ phase records decisions (problem → options → tradeoffs → choice).
 ## Phased roadmap
 
 1. **Core API + in-memory hash index** — `open/close/put/get/Delete` — **done**
-2. **Append-only persistence** — binary records; index holds file offsets
+2. **Append-only persistence** — binary records; index holds file offsets — **done**
 3. **Integrity & recovery** — CRC32, log replay, fsync policy, crash tests
 4. **Compaction** — write-new-file → fsync → atomic rename
 5. **Concurrency** — single writer, multiple readers; stress tests
@@ -102,13 +102,10 @@ ekv::Store::size() / empty()
 
 Keys must be non-empty. Empty values are allowed.
 
-### Assumptions & technical debt
+### Assumptions & technical debt (Phase 1 — superseded where noted)
 
 - Single-threaded only (Phase 5 adds locking).
-- `get` copies the value out (fine until large values + log-backed reads).
-- Hash lookup currently constructs a temporary `std::string` key (no
-  transparent/`string_view` hashing yet).
-- No WAL, CRC, or compaction.
+- Hash lookup constructs a temporary `std::string` key (no transparent hash yet).
 
 ### Interview prompts
 
@@ -120,6 +117,64 @@ Keys must be non-empty. Empty values are allowed.
 
 ---
 
+## Phase 2 — Append-only log + binary records
+
+### Problem
+
+Survive process restart: durable put/delete history, fast point lookups without
+scanning the whole file on every `get`.
+
+### Options considered
+
+| Area | Option A | Option B | Option C |
+|------|----------|----------|----------|
+| Persistence model | Update-in-place pages | Append-only log (Bitcask) | Full B-Tree on disk |
+| Index contents | Full value in RAM | Key → file offset | Separate disk index file |
+| I/O API | POSIX `read`/`write`/`pwrite` | `std::fstream` | memory-map |
+| Delete | Physical erase in file | Tombstone record | Separate delete list |
+| Torn write | Ignore (Phase 2) | Truncate to last good record | CRC + careful recovery (Phase 3) |
+
+### Tradeoffs
+
+- **Update-in-place**: complex free space, hard crash consistency.
+- **Append-only**: simple crash story (prefix of log is valid), needs compaction
+  later; file grows with every overwrite/delete.
+- **Offset index**: RAM holds keys + locators only; large values stay on disk.
+  Rebuild index by sequential replay on `open` (acceptable until a durable
+  index or manfiest is added).
+- **`std::fstream`**: portable on Windows/MinGW and Linux; Phase 3 can add
+  `fsync` via native handles if needed.
+- **Tombstones**: deletes are durable and ordered; space reclaimed in Phase 4.
+
+### Decision
+
+1. Single log file: `<data_dir>/ekv.log`.
+2. File header: magic `EKVL`, version `1`, reserved (16 bytes).
+3. Records: `type(u8) | key_len(u32le) | value_len(u32le) | key | value`.
+4. `HashIndex` stores `RecordLocator{value_offset, value_size}`.
+5. `put` / `Delete` append then update memory index; `get` reads by offset.
+6. `open` replays the log (last write wins; delete removes from index).
+7. On open, trim a torn tail to the end of the last complete record so new
+   appends remain visible to replay.
+
+### Assumptions & technical debt
+
+- Flush to OS buffers after each append (`fstream::flush`); **not** full
+  `fsync` durability (Phase 3).
+- No per-record CRC (Phase 3).
+- No compaction — overwritten keys leave garbage (Phase 4).
+- Single log file only (no multi-file generations yet).
+- Replay is O(file size) on every open.
+
+### Interview prompts
+
+- Why append-only instead of update-in-place?
+- How do tombstones interact with replay order?
+- What is a torn write, and why truncate the tail on open?
+- How would CRC32 change the recovery condition for the last record?
+
+---
+
 ## Decision log
 
 | Phase | Decision | Rationale |
@@ -127,3 +182,6 @@ Keys must be non-empty. Empty values are allowed.
 | 1 | `unordered_map` + values in memory | Fast point lookups; minimal surface before persistence |
 | 1 | Exceptions for misuse, optional for miss | Matches “not found is normal” lookup semantics |
 | 1 | `Delete` not `delete` | C++ keyword constraint |
+| 2 | Append-only `ekv.log` + offset index | Simple durability + Bitcask-style reads |
+| 2 | Tombstone deletes | Durable delete without rewriting history |
+| 2 | Trim incomplete tail on open | Keeps append cursor consistent before CRC |

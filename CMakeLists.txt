@@ -49,6 +49,7 @@ target_include_directories(ekv
 
 target_sources(ekv PRIVATE
   store/store.cpp
+  storage/append_log.cpp
 )
 
 ekv_apply_warnings(ekv)

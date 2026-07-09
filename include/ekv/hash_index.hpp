@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ekv/record.hpp"
+
 #include <optional>
 #include <string>
 #include <string_view>
@@ -8,22 +10,19 @@
 
 namespace ekv {
 
-// In-memory key → value map (Phase 1).
+// In-memory key → durable location map.
 //
-// Phase 2 will change the mapped type from the full value to a durable
-// location (file offset + length). The public methods intentionally take
-// ownership of keys/values on put so callers can move large strings in.
+// Phase 1 stored full values here. Phase 2 stores RecordLocator (value offset
+// + size in the append-only log). Keys remain in RAM for O(1) point lookups.
 class HashIndex {
  public:
-  using Map = std::unordered_map<std::string, std::string>;
+  using Map = std::unordered_map<std::string, RecordLocator>;
 
-  void put(std::string key, std::string value) {
-    map_.insert_or_assign(std::move(key), std::move(value));
+  void put(std::string key, RecordLocator locator) {
+    map_.insert_or_assign(std::move(key), locator);
   }
 
-  // Returns a copy so the index remains free to relocate entries later.
-  // Phase 2 may switch to reading bytes from the log instead of copying.
-  [[nodiscard]] std::optional<std::string> get(std::string_view key) const {
+  [[nodiscard]] std::optional<RecordLocator> get(std::string_view key) const {
     const auto it = map_.find(std::string(key));
     if (it == map_.end()) {
       return std::nullopt;
@@ -46,7 +45,9 @@ class HashIndex {
 
   void clear() noexcept { map_.clear(); }
 
-  [[nodiscard]] Map::const_iterator begin() const noexcept { return map_.begin(); }
+  [[nodiscard]] Map::const_iterator begin() const noexcept {
+    return map_.begin();
+  }
   [[nodiscard]] Map::const_iterator end() const noexcept { return map_.end(); }
 
  private:
