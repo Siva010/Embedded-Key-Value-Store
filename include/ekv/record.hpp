@@ -8,11 +8,11 @@
 namespace ekv {
 
 // ---------------------------------------------------------------------------
-// On-disk layout (Phase 2)
+// On-disk layout (Phase 3 / format version 2)
 //
 // File header (16 bytes, little-endian multi-byte fields):
 //   magic[4]  = 'E' 'K' 'V' 'L'
-//   version   = uint32  (currently 1)
+//   version   = uint32  (2)
 //   reserved  = uint64  (0)
 //
 // Record (variable length):
@@ -21,22 +21,26 @@ namespace ekv {
 //   value_len  = uint32  (0 for Delete)
 //   key        = key_len bytes
 //   value      = value_len bytes
+//   crc32      = uint32  (CRC-32 of type||key_len||value_len||key||value)
 //
-// Phase 3 will extend integrity (CRC32) without changing the logical
-// put/delete model; a format version bump may accompany that.
+// Recovery policy (see docs/architecture.md Phase 3):
+//   - Incomplete trailing record → truncate, keep prior prefix
+//   - Full record with bad CRC at end-of-file → treat as torn tail, truncate
+//   - Bad CRC not at end → hard corruption, fail open
 // ---------------------------------------------------------------------------
 
 inline constexpr char kLogMagic[4] = {'E', 'K', 'V', 'L'};
-inline constexpr std::uint32_t kLogFormatVersion = 1;
+inline constexpr std::uint32_t kLogFormatVersion = 2;
 inline constexpr std::size_t kFileHeaderSize = 16;
 
+// Leading fields before key/value payload.
 inline constexpr std::size_t kRecordHeaderSize =
     1 + 4 + 4;  // type + key_len + value_len
+inline constexpr std::size_t kRecordCrcSize = 4;
 
 inline constexpr std::uint8_t kRecordPut = 1;
 inline constexpr std::uint8_t kRecordDelete = 2;
 
-// Reject absurd lengths from a corrupt/truncated file (Phase 3 tightens this).
 inline constexpr std::uint32_t kMaxKeyLen = 16u * 1024u * 1024u;    // 16 MiB
 inline constexpr std::uint32_t kMaxValueLen = 64u * 1024u * 1024u;  // 64 MiB
 
@@ -46,8 +50,14 @@ struct RecordLocator {
   std::uint32_t value_size = 0;
 };
 
+[[nodiscard]] inline std::uint64_t record_total_size(std::uint32_t key_len,
+                                                     std::uint32_t value_len) noexcept {
+  return static_cast<std::uint64_t>(kRecordHeaderSize) + key_len + value_len +
+         kRecordCrcSize;
+}
+
 inline void write_u32_le(char* dest, std::uint32_t value) noexcept {
-  const auto u = static_cast<unsigned char*>(static_cast<void*>(dest));
+  auto* u = reinterpret_cast<unsigned char*>(dest);
   u[0] = static_cast<unsigned char>(value & 0xFFu);
   u[1] = static_cast<unsigned char>((value >> 8) & 0xFFu);
   u[2] = static_cast<unsigned char>((value >> 16) & 0xFFu);

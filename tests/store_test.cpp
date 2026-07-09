@@ -58,11 +58,14 @@ static void test_record_header_roundtrip() {
   EXPECT(h.type == ekv::kRecordPut);
   EXPECT(h.key_len == 3);
   EXPECT(h.value_len == 7);
+  EXPECT(ekv::record_total_size(3, 7) ==
+         ekv::kRecordHeaderSize + 3 + 7 + ekv::kRecordCrcSize);
 
   char fhdr[ekv::kFileHeaderSize];
   ekv::encode_file_header(fhdr);
   std::uint32_t ver = 0;
   EXPECT(ekv::file_header_valid(fhdr, &ver));
+  EXPECT(ver == 2);
   EXPECT(ver == ekv::kLogFormatVersion);
 }
 

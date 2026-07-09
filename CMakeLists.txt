@@ -50,6 +50,8 @@ target_include_directories(ekv
 target_sources(ekv PRIVATE
   store/store.cpp
   storage/append_log.cpp
+  storage/crc32.cpp
+  storage/os_sync.cpp
 )
 
 ekv_apply_warnings(ekv)

@@ -14,15 +14,15 @@ persistence, in-memory indexing, and careful durability semantics.
 | 0     | Project scaffold, CMake, layout            | Done    |
 | 1     | Core API + in-memory hash index            | Done    |
 | 2     | Append-only log + binary records           | Done    |
-| 3     | CRC32, recovery, fsync, crash tests        | Planned |
+| 3     | CRC32, recovery, fsync, crash tests        | Done    |
 | 4     | Compaction (write → fsync → atomic rename) | Planned |
 | 5     | Single writer / multi-reader + stress      | Planned |
 | 6     | Config, ARM/QEMU, benchmarks               | Planned |
 
-**Phase 2 note:** Data is stored in `data/ekv.log` (append-only). The in-memory
-index maps keys → file offsets. `open` replays the log. Old versions of keys
-remain in the file until Phase 4 compaction. CRC32 / hard `fsync` policy land
-in Phase 3.
+**Phase 3 note:** Log format **v2** — each record ends with CRC-32; every append
+`flush` + OS sync (`fsync` / `FlushFileBuffers`). Torn tails and a bad CRC on
+the last record are truncated on open; mid-file CRC failures raise
+`ErrorCode::Corruption`. **Breaking:** Phase 2 (v1) log files are not readable.
 
 ## Requirements
 

@@ -7,7 +7,6 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
-#include <optional>
 #include <string>
 #include <string_view>
 
@@ -15,12 +14,11 @@ namespace ekv {
 
 // Append-only durable log (single file under the store data directory).
 //
-// Writers append Put/Delete records. Readers rebuild an index by replaying
-// from the file header, and fetch values by absolute file offset.
+// Writers append Put/Delete records with trailing CRC32 and fsync after each
+// append. Readers rebuild an index by replaying complete, CRC-valid records.
 class AppendLog {
  public:
-  // Called for each complete record during replay (in file order).
-  // For Put: locator points at the value payload. For Delete: size is 0.
+  // Called for each complete CRC-valid record during replay (file order).
   using ReplayFn = std::function<void(
       std::uint8_t type, std::string_view key, RecordLocator locator)>;
 
@@ -32,7 +30,7 @@ class AppendLog {
   AppendLog(AppendLog&&) noexcept;
   AppendLog& operator=(AppendLog&&) noexcept;
 
-  // Open or create `path`. Replays nothing itself — caller owns index rebuild.
+  // Open or create `path`. Trims a torn/bad tail; fails on mid-file corruption.
   void open(const std::filesystem::path& path);
 
   void close() noexcept;
@@ -43,35 +41,36 @@ class AppendLog {
     return path_;
   }
 
-  // Append a Put record. Returns locator for the written value bytes.
-  RecordLocator append_put(std::string_view key, std::string_view value);
+  // Bytes discarded from a torn or CRC-bad tail on the last open (0 if clean).
+  [[nodiscard]] std::uint64_t recovered_tail_bytes() const noexcept {
+    return recovered_tail_bytes_;
+  }
 
-  // Append a Delete (tombstone) record.
+  RecordLocator append_put(std::string_view key, std::string_view value);
   void append_delete(std::string_view key);
 
-  // Read value bytes at an absolute file offset.
   [[nodiscard]] std::string read_value(RecordLocator locator) const;
 
-  // Scan all complete records after the file header. Stops cleanly at a
-  // truncated tail (incomplete final record is ignored — Phase 3 + CRC).
   void replay(const ReplayFn& on_record) const;
 
-  // Force buffered data to the OS (not necessarily to stable media; Phase 3).
+  // flush + OS durable sync (FlushFileBuffers / fsync).
   void sync();
 
  private:
   void ensure_open() const;
   std::uint64_t append_record(std::uint8_t type, std::string_view key,
                               std::string_view value);
-  // Scan complete records; return file offset where the next append should go.
-  // Truncated tails are skipped (not deleted until Phase 3 recovery policy).
-  [[nodiscard]] std::uint64_t find_next_append_offset() const;
+
+  // Walk records. On success sets *out_append_pos to the first invalid offset.
+  // Throws Corruption if a bad CRC is found before the recoverable tail region.
+  void scan_records(const ReplayFn* on_record,
+                    std::uint64_t* out_append_pos) const;
 
   bool open_ = false;
   std::filesystem::path path_;
-  // mutable: allows const read/replay while a single writer holds the log.
   mutable std::fstream file_;
   std::uint64_t write_pos_ = 0;
+  std::uint64_t recovered_tail_bytes_ = 0;
 };
 
 }  // namespace ekv

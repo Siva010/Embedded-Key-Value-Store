@@ -31,7 +31,7 @@ phase records decisions (problem → options → tradeoffs → choice).
 
 1. **Core API + in-memory hash index** — `open/close/put/get/Delete` — **done**
 2. **Append-only persistence** — binary records; index holds file offsets — **done**
-3. **Integrity & recovery** — CRC32, log replay, fsync policy, crash tests
+3. **Integrity & recovery** — CRC32, log replay, fsync policy, crash tests — **done**
 4. **Compaction** — write-new-file → fsync → atomic rename
 5. **Concurrency** — single writer, multiple readers; stress tests
 6. **Ops** — configuration, ARM/QEMU, benchmarks
@@ -149,19 +149,15 @@ scanning the whole file on every `get`.
 ### Decision
 
 1. Single log file: `<data_dir>/ekv.log`.
-2. File header: magic `EKVL`, version `1`, reserved (16 bytes).
-3. Records: `type(u8) | key_len(u32le) | value_len(u32le) | key | value`.
+2. File header: magic `EKVL`, version field, reserved (16 bytes).
+3. Records (Phase 2 base): `type | key_len | value_len | key | value`.
 4. `HashIndex` stores `RecordLocator{value_offset, value_size}`.
 5. `put` / `Delete` append then update memory index; `get` reads by offset.
 6. `open` replays the log (last write wins; delete removes from index).
-7. On open, trim a torn tail to the end of the last complete record so new
-   appends remain visible to replay.
+7. On open, trim a torn tail to the end of the last complete record.
 
-### Assumptions & technical debt
+### Assumptions & technical debt (Phase 2 — superseded by Phase 3 where noted)
 
-- Flush to OS buffers after each append (`fstream::flush`); **not** full
-  `fsync` durability (Phase 3).
-- No per-record CRC (Phase 3).
 - No compaction — overwritten keys leave garbage (Phase 4).
 - Single log file only (no multi-file generations yet).
 - Replay is O(file size) on every open.
@@ -175,6 +171,63 @@ scanning the whole file on every `get`.
 
 ---
 
+## Phase 3 — CRC32, fsync, recovery
+
+### Problem
+
+Detect torn or bit-flipped records; push data to stable storage so a process
+crash (and, as far as the OS allows, a power loss) does not silently lose a
+“successful” put; define clear open-time recovery rules.
+
+### Options considered
+
+| Area | Option A | Option B | Option C |
+|------|----------|----------|----------|
+| Checksum | No checksum | Trailing CRC-32 per record | Full-file Merkle / xxHash |
+| CRC placement | Leading (before payload) | Trailing (after payload) | Separate checksum file |
+| Sync policy | `flush` only | Sync every append | Group commit / timed sync |
+| Bad last CRC | Fail open | Truncate tail | Retry / salvage |
+| Mid-file bad CRC | Truncate there | Fail open | Skip record |
+
+### Tradeoffs
+
+- **CRC-32**: cheap, universal, detects torn writes and many bit errors; not
+  cryptographic.
+- **Trailing CRC**: natural for append (write body, then checksum); length still
+  trusted before reading payload — combined with max-size caps.
+- **Sync every write**: strongest simple durability, hurts throughput (Phase 6
+  benchmarks will show this; batching can come later).
+- **Truncate bad tail vs fail**: matches LevelDB-style “prefix is valid”; mid-file
+  damage is not something silent truncation should hide.
+
+### Decision
+
+1. **Format version 2** (breaking vs Phase 2 v1 files).
+2. Record: `type | key_len | value_len | key | value | crc32_le` where CRC covers
+   `type||key_len||value_len||key||value` (zlib/IEEE polynomial).
+3. After each append: `fstream::flush` + `sync_path` (`fsync` / `FlushFileBuffers`).
+4. Recovery (also documented in `include/ekv/recovery.hpp`):
+   - incomplete trailing record → truncate
+   - full last record with bad CRC → truncate
+   - bad CRC with more file bytes after → `ErrorCode::Corruption`
+5. Crash tests simulate torn tails and CRC flips without killing the process.
+
+### Assumptions & technical debt
+
+- Sync-on-every-write is slow; no group commit yet.
+- Header itself is not checksummed.
+- True power-loss tests need hardware/VM kill; we approximate with file surgery.
+- Compaction still absent (Phase 4).
+
+### Interview prompts
+
+- Why is a bad CRC on the *last* record treated differently from mid-file?
+- What does `fsync` guarantee that `fflush` does not?
+- Why not use a cryptographic hash for records?
+- How would group commit change the failure model?
+
+---
+
 ## Decision log
 
 | Phase | Decision | Rationale |
@@ -185,3 +238,6 @@ scanning the whole file on every `get`.
 | 2 | Append-only `ekv.log` + offset index | Simple durability + Bitcask-style reads |
 | 2 | Tombstone deletes | Durable delete without rewriting history |
 | 2 | Trim incomplete tail on open | Keeps append cursor consistent before CRC |
+| 3 | Format v2 + trailing CRC-32 | Detect torn/corrupt records |
+| 3 | Sync every append | Strong educational durability default |
+| 3 | Tail truncate vs mid-file fail | Availability for crash tails; safety for deep damage |

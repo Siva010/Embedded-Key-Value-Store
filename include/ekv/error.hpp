@@ -15,6 +15,7 @@ enum class ErrorCode {
   NotFound,
   InvalidArgument,
   IoError,
+  Corruption,  // mid-file integrity failure (not a recoverable torn tail)
 };
 
 [[nodiscard]] constexpr std::string_view to_string(ErrorCode code) noexcept {
@@ -31,6 +32,8 @@ enum class ErrorCode {
       return "invalid argument";
     case ErrorCode::IoError:
       return "I/O error";
+    case ErrorCode::Corruption:
+      return "corruption";
   }
   return "unknown";
 }

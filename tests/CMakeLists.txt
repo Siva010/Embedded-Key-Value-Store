@@ -10,3 +10,8 @@ add_executable(ekv_store_test store_test.cpp)
 target_link_libraries(ekv_store_test PRIVATE ekv::ekv)
 ekv_apply_warnings(ekv_store_test)
 add_test(NAME ekv_store_test COMMAND ekv_store_test)
+
+add_executable(ekv_recovery_test recovery_test.cpp)
+target_link_libraries(ekv_recovery_test PRIVATE ekv::ekv)
+ekv_apply_warnings(ekv_recovery_test)
+add_test(NAME ekv_recovery_test COMMAND ekv_recovery_test)
