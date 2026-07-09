@@ -30,6 +30,7 @@ AppendLog::~AppendLog() { close(); }
 
 AppendLog::AppendLog(AppendLog&& other) noexcept
     : open_(other.open_),
+      sync_mode_(other.sync_mode_),
       path_(std::move(other.path_)),
       file_(std::move(other.file_)),
       write_pos_(other.write_pos_),
@@ -37,12 +38,14 @@ AppendLog::AppendLog(AppendLog&& other) noexcept
   other.open_ = false;
   other.write_pos_ = 0;
   other.recovered_tail_bytes_ = 0;
+  other.sync_mode_ = SyncMode::Full;
 }
 
 AppendLog& AppendLog::operator=(AppendLog&& other) noexcept {
   if (this != &other) {
     close();
     open_ = other.open_;
+    sync_mode_ = other.sync_mode_;
     path_ = std::move(other.path_);
     file_ = std::move(other.file_);
     write_pos_ = other.write_pos_;
@@ -50,6 +53,7 @@ AppendLog& AppendLog::operator=(AppendLog&& other) noexcept {
     other.open_ = false;
     other.write_pos_ = 0;
     other.recovered_tail_bytes_ = 0;
+    other.sync_mode_ = SyncMode::Full;
   }
   return *this;
 }
@@ -60,7 +64,7 @@ void AppendLog::ensure_open() const {
   }
 }
 
-void AppendLog::open(const fs::path& path) {
+void AppendLog::open(const fs::path& path, SyncMode sync_mode) {
   if (open_) {
     throw Error(ErrorCode::AlreadyOpen, "append log is already open");
   }
@@ -68,6 +72,7 @@ void AppendLog::open(const fs::path& path) {
     throw Error(ErrorCode::InvalidArgument, "log path must not be empty");
   }
 
+  sync_mode_ = sync_mode;
   recovered_tail_bytes_ = 0;
   const bool exists = fs::exists(path);
   std::ios::openmode mode = std::ios::in | std::ios::out | std::ios::binary;
@@ -101,21 +106,18 @@ void AppendLog::open(const fs::path& path) {
       file_.close();
       throw_io("failed to write log file header");
     }
-    file_.flush();
-    if (!file_) {
-      file_.close();
-      throw_io("failed to flush log file header");
-    }
+    open_ = true;
+    write_pos_ = kFileHeaderSize;
     try {
-      sync_path(path_);
+      apply_append_durability();
     } catch (...) {
+      open_ = false;
       file_.close();
       path_.clear();
+      write_pos_ = 0;
       throw;
     }
-    write_pos_ = kFileHeaderSize;
     file_.clear();
-    open_ = true;
     return;
   }
 
@@ -282,6 +284,7 @@ void AppendLog::close() noexcept {
   path_.clear();
   write_pos_ = 0;
   recovered_tail_bytes_ = 0;
+  sync_mode_ = SyncMode::Full;
   open_ = false;
 }
 
@@ -292,6 +295,17 @@ void AppendLog::sync() {
     throw_io("failed to flush log");
   }
   sync_path(path_);
+}
+
+void AppendLog::apply_append_durability() {
+  // Always flush so concurrent/same-process positioned readers see new bytes.
+  file_.flush();
+  if (!file_) {
+    throw_io("failed to flush log");
+  }
+  if (sync_mode_ == SyncMode::Full) {
+    sync_path(path_);
+  }
 }
 
 std::uint64_t AppendLog::append_record(std::uint8_t type, std::string_view key,
@@ -333,8 +347,7 @@ std::uint64_t AppendLog::append_record(std::uint8_t type, std::string_view key,
     throw_io("failed to append record to log");
   }
 
-  // Durability: userspace flush then OS stable-media sync.
-  sync();
+  apply_append_durability();
 
   const std::uint64_t record_offset = write_pos_;
   write_pos_ += record_total_size(key_len, value_len);

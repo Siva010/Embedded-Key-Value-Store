@@ -29,6 +29,7 @@ Store::~Store() { close(); }
 Store::Store(Store&& other) noexcept {
   std::unique_lock lock(other.mu_);
   open_ = other.open_;
+  options_ = other.options_;
   path_ = std::move(other.path_);
   index_ = std::move(other.index_);
   log_ = std::move(other.log_);
@@ -45,6 +46,7 @@ Store& Store::operator=(Store&& other) noexcept {
 
   close_unlocked();
   open_ = other.open_;
+  options_ = other.options_;
   path_ = std::move(other.path_);
   index_ = std::move(other.index_);
   log_ = std::move(other.log_);
@@ -96,8 +98,14 @@ void Store::cleanup_compaction_artifacts(const fs::path& dir) {
   }
 }
 
-void Store::open(const fs::path& path) {
+void Store::open(const fs::path& path) { open(path, Options{}); }
+
+void Store::open(const fs::path& path, Options options) {
   std::unique_lock lock(mu_);
+  open_unlocked(path, options);
+}
+
+void Store::open_unlocked(const fs::path& path, Options options) {
   if (open_) {
     throw Error(ErrorCode::AlreadyOpen, "store is already open");
   }
@@ -116,15 +124,17 @@ void Store::open(const fs::path& path) {
   if (ec) {
     path_ = path;
   }
+  options_ = options;
 
   try {
     cleanup_compaction_artifacts(path_);
-    log_.open(log_path_for(path_));
+    log_.open(log_path_for(path_), options_.sync_mode);
     rebuild_index_from_log();
   } catch (...) {
     log_.close();
     path_.clear();
     index_.clear();
+    options_ = Options{};
     throw;
   }
 
@@ -138,6 +148,7 @@ void Store::close_unlocked() noexcept {
   log_.close();
   index_.clear();
   path_.clear();
+  options_ = Options{};
   open_ = false;
 }
 
@@ -154,6 +165,11 @@ bool Store::is_open() const noexcept {
 std::filesystem::path Store::path() const {
   std::shared_lock lock(mu_);
   return path_;
+}
+
+Options Store::options() const {
+  std::shared_lock lock(mu_);
+  return options_;
 }
 
 void Store::put(std::string_view key, std::string_view value) {
@@ -223,10 +239,11 @@ CompactStats Store::compact() {
 
   {
     AppendLog fresh;
-    fresh.open(compactp);
+    fresh.open(compactp, options_.sync_mode);
     for (const auto& row : live) {
       (void)fresh.append_put(row.key, row.value);
     }
+    // Explicit full durable point before install regardless of SyncMode.
     fresh.sync();
     stats.bytes_after = fresh.size_bytes();
     fresh.close();
@@ -258,7 +275,7 @@ CompactStats Store::compact() {
         fs::rename(oldp, logp, ec);
       }
       if (fs::exists(logp, ec)) {
-        log_.open(logp);
+        log_.open(logp, options_.sync_mode);
         rebuild_index_from_log();
       }
     } catch (...) {
@@ -267,7 +284,7 @@ CompactStats Store::compact() {
     throw;
   }
 
-  log_.open(logp);
+  log_.open(logp, options_.sync_mode);
   rebuild_index_from_log();
   stats.live_keys = index_.size();
   stats.bytes_after = log_.size_bytes();

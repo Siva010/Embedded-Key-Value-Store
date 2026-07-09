@@ -27,3 +27,8 @@ add_executable(ekv_concurrency_test concurrency_test.cpp)
 target_link_libraries(ekv_concurrency_test PRIVATE ekv::ekv Threads::Threads)
 ekv_apply_warnings(ekv_concurrency_test)
 add_test(NAME ekv_concurrency_test COMMAND ekv_concurrency_test)
+
+add_executable(ekv_options_test options_test.cpp)
+target_link_libraries(ekv_options_test PRIVATE ekv::ekv)
+ekv_apply_warnings(ekv_options_test)
+add_test(NAME ekv_options_test COMMAND ekv_options_test)

@@ -17,7 +17,7 @@ persistence, in-memory indexing, and careful durability semantics.
 | 3     | CRC32, recovery, fsync, crash tests        | Done    |
 | 4     | Compaction (write → fsync → atomic rename) | Done    |
 | 5     | Single writer / multi-reader + stress      | Done    |
-| 6     | Config, ARM/QEMU, benchmarks               | Planned |
+| 6     | Config, ARM/QEMU, benchmarks               | Done    |
 
 **Phase 3 note:** Log format **v2** — each record ends with CRC-32; every append
 `flush` + OS sync (`fsync` / `FlushFileBuffers`). Torn tails and a bad CRC on
@@ -31,6 +31,10 @@ dropped). Interrupted compact temps are cleaned or promoted on `open`.
 **Phase 5 note:** `std::shared_mutex` — concurrent `get`/`size` (shared), exclusive
 `put`/`Delete`/`compact`/`open`/`close`. Value reads use positioned OS I/O so
 readers do not share the append stream cursor.
+
+**Phase 6 note:** `ekv::Options` / `SyncMode` (`full` default, `flush`, `none`) at
+`open`. Benchmarks: `build/bench/ekv_bench`. ARM cross + QEMU: see
+`docs/arm_qemu.md` and `cmake/toolchains/aarch64-linux-gnu.cmake`.
 
 ## Requirements
 
@@ -46,12 +50,20 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+Benchmark (Release recommended):
+
+```bash
+cmake -S . -B build-rel -DCMAKE_BUILD_TYPE=Release
+cmake --build build-rel
+./build-rel/bench/ekv_bench --ops 10000 --sync flush
+```
+
 Optional flags:
 
 | Option              | Default | Meaning                |
 |---------------------|---------|------------------------|
 | `EKV_BUILD_TESTS`   | ON      | Unit / smoke tests     |
-| `EKV_BUILD_BENCH`   | ON      | Benchmarks (later)     |
+| `EKV_BUILD_BENCH`   | ON      | `ekv_bench` microbench |
 | `EKV_BUILD_EXAMPLES`| ON      | Example programs       |
 | `EKV_ENABLE_WARNINGS` | ON    | Strict warnings        |
 
@@ -60,15 +72,18 @@ Optional flags:
 ```cpp
 #include "ekv/store.hpp"
 
+ekv::Options opt;
+opt.sync_mode = ekv::SyncMode::Full;  // or Flush / None
+
 ekv::Store db;
-db.open("data");          // creates data/ and data/ekv.log
+db.open("data", opt);     // creates data/ and data/ekv.log
 db.put("key", "value");
 if (auto v = db.get("key")) {
   // *v == "value"
 }
 db.Delete("key");
+db.compact();             // reclaim garbage
 db.close();
-// reopen later — put/delete history is replayed from ekv.log
 ```
 
 ## Layout

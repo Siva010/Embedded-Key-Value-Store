@@ -34,7 +34,7 @@ phase records decisions (problem → options → tradeoffs → choice).
 3. **Integrity & recovery** — CRC32, log replay, fsync policy, crash tests — **done**
 4. **Compaction** — write-new-file → fsync → atomic rename — **done**
 5. **Concurrency** — single writer, multiple readers; stress tests — **done**
-6. **Ops** — configuration, ARM/QEMU, benchmarks
+6. **Ops** — configuration, ARM/QEMU, benchmarks — **done**
 
 ## Non-goals (for now)
 
@@ -330,6 +330,48 @@ the append log and in-memory index — without multi-process sharing.
 
 ---
 
+## Phase 6 — Configuration, benchmarks, ARM/QEMU
+
+### Problem
+
+Operators need to trade durability for speed, measure the cost of sync-on-write,
+and validate that the engine is not x86-only.
+
+### Options considered
+
+| Area | Option A | Option B | Option C |
+|------|----------|----------|----------|
+| Config | Compile-time only | `Options` at `open` | Config file / env |
+| Sync knobs | Always fsync | Full / Flush / None | Group commit |
+| Bench | Ad-hoc scripts | In-tree `ekv_bench` | Google Benchmark |
+| ARM | Docs only | Cross toolchain file + QEMU | Full CI farm |
+
+### Decision
+
+1. `ekv::Options` with `SyncMode` applied per append (`AppendLog`).
+2. Default remains `SyncMode::Full` (educational durability default).
+3. Compact still ends with explicit `sync()` before rename (install barrier).
+4. `bench/ekv_bench` reports throughput and average latency for put/get/overwrite
+   and open/replay time.
+5. `cmake/toolchains/aarch64-linux-gnu.cmake` + `docs/arm_qemu.md` for cross +
+   qemu-user validation.
+
+### Assumptions & technical debt
+
+- No runtime reconfiguration without reopen.
+- No group commit / wal batching yet.
+- QEMU user-mode numbers are not bare-metal performance.
+- Benchmark is intentionally dependency-free (not Google Benchmark).
+
+### Interview prompts
+
+- What does `Flush` guarantee that `None` does not?
+- Why keep an explicit full sync at the end of compaction even if puts use `None`?
+- How would you design group commit on top of this log?
+- What endianness assumptions does the on-disk format make for ARM?
+
+---
+
 ## Decision log
 
 | Phase | Decision | Rationale |
@@ -347,3 +389,6 @@ the append log and in-memory index — without multi-process sharing.
 | 4 | Live set from hash index | O(live) rewrite; tombstones dropped |
 | 5 | `shared_mutex` SWMR | Multiple concurrent gets; exclusive mutations |
 | 5 | Positioned `read_path_region` for values | Avoid shared fstream cursor races |
+| 6 | `Options.sync_mode` Full/Flush/None | Tunable durability vs throughput |
+| 6 | `ekv_bench` microbench | Measure put/get/overwrite/open cost |
+| 6 | aarch64 toolchain + QEMU notes | Portable embedded validation path |
