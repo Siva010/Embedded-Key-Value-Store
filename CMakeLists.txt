@@ -47,13 +47,9 @@ target_include_directories(ekv
     $<INSTALL_INTERFACE:include>
 )
 
-# Placeholder so the empty STATIC library configures cleanly on all generators.
-# Real translation units replace this as features are implemented.
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ekv_placeholder.cpp"
-  "// Auto-generated placeholder; replaced by real sources in later commits.\n"
-  "namespace ekv { void placeholder() {}\n}\n"
+target_sources(ekv PRIVATE
+  store/store.cpp
 )
-target_sources(ekv PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ekv_placeholder.cpp")
 
 ekv_apply_warnings(ekv)
 

@@ -9,15 +9,19 @@ persistence, in-memory indexing, and careful durability semantics.
 
 ## Status
 
-| Phase | Scope                                      | Status      |
-|-------|--------------------------------------------|-------------|
-| 0     | Project scaffold, CMake, layout            | In progress |
-| 1     | Core API + in-memory hash index            | Planned     |
-| 2     | Append-only log + binary records           | Planned     |
-| 3     | CRC32, recovery, fsync, crash tests        | Planned     |
-| 4     | Compaction (write → fsync → atomic rename) | Planned     |
-| 5     | Single writer / multi-reader + stress      | Planned     |
-| 6     | Config, ARM/QEMU, benchmarks               | Planned     |
+| Phase | Scope                                      | Status  |
+|-------|--------------------------------------------|---------|
+| 0     | Project scaffold, CMake, layout            | Done    |
+| 1     | Core API + in-memory hash index            | Done    |
+| 2     | Append-only log + binary records           | Planned |
+| 3     | CRC32, recovery, fsync, crash tests        | Planned |
+| 4     | Compaction (write → fsync → atomic rename) | Planned |
+| 5     | Single writer / multi-reader + stress      | Planned |
+| 6     | Config, ARM/QEMU, benchmarks               | Planned |
+
+**Phase 1 note:** `open`/`close`/`put`/`get`/`Delete` work entirely in memory.
+The data directory is created for later durability; restart loses data until
+Phase 2.
 
 ## Requirements
 
@@ -42,12 +46,27 @@ Optional flags:
 | `EKV_BUILD_EXAMPLES`| ON      | Example programs       |
 | `EKV_ENABLE_WARNINGS` | ON    | Strict warnings        |
 
+## Quick start (Phase 1 API)
+
+```cpp
+#include "ekv/store.hpp"
+
+ekv::Store db;
+db.open("data");
+db.put("key", "value");
+if (auto v = db.get("key")) {
+  // *v == "value"
+}
+db.Delete("key");
+db.close();
+```
+
 ## Layout
 
 ```text
-include/ekv/   Public headers
-store/         Store facade (Phase 1+)
-index/         Hash index (Phase 1+)
+include/ekv/   Public headers (store, hash_index, error, version)
+store/         Store facade
+index/         Reserved for index .cpp in later phases
 storage/       Append-only log (Phase 2+)
 wal/           WAL details (Phase 2–3)
 recovery/      Replay & integrity (Phase 3+)
