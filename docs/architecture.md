@@ -33,7 +33,7 @@ phase records decisions (problem → options → tradeoffs → choice).
 2. **Append-only persistence** — binary records; index holds file offsets — **done**
 3. **Integrity & recovery** — CRC32, log replay, fsync policy, crash tests — **done**
 4. **Compaction** — write-new-file → fsync → atomic rename — **done**
-5. **Concurrency** — single writer, multiple readers; stress tests
+5. **Concurrency** — single writer, multiple readers; stress tests — **done**
 6. **Ops** — configuration, ARM/QEMU, benchmarks
 
 ## Non-goals (for now)
@@ -281,6 +281,55 @@ Disk grows without bound even if the live key set is small.
 
 ---
 
+## Phase 5 — Concurrency (single writer / multi-reader)
+
+### Problem
+
+Allow concurrent point lookups while mutations remain correctly serialized with
+the append log and in-memory index — without multi-process sharing.
+
+### Options considered
+
+| Area | Option A | Option B | Option C |
+|------|----------|----------|----------|
+| Lock | Global `mutex` | `shared_mutex` (RW) | Lock-free index + log seqlock |
+| Read I/O | Shared `fstream` seek | Positioned `pread`/ReadFile | mmap |
+| Writers | Single logical writer | Sharded writers | Actor queue |
+
+### Tradeoffs
+
+- **Global mutex**: simple, no true multi-reader parallelism.
+- **`shared_mutex`**: matches SWMR; compact/put take exclusive lock and block
+  readers (acceptable; compact is rare).
+- **Shared fstream for get**: data race on get/put cursor — **unsafe**.
+- **Positioned reads**: each get reads by absolute offset; concurrent readers OK
+  while the shared lock is held (no writer).
+- **Lock-free**: high complexity for educational phase; deferred.
+
+### Decision
+
+1. `mutable std::shared_mutex` on `Store`.
+2. Shared: `get`, `size`, `empty`, `log_size_bytes`, `is_open`, `path`.
+3. Unique: `put`, `Delete`, `compact`, `open`, `close`.
+4. `AppendLog::read_value` → `read_path_region` (OS positioned read).
+5. Stress tests: multi-reader, SWMR puts, compact under readers, deletes.
+
+### Assumptions & technical debt
+
+- Not multi-process safe (one process opens the data dir).
+- No reader-writer preference tuning / writer starvation mitigation beyond STL.
+- Move of `Store` requires exclusive access (documented).
+- Compact still buffers live values in RAM under the exclusive lock.
+
+### Interview prompts
+
+- Why is concurrent `const` access to `unordered_map` OK only without writers?
+- Why can't multiple threads share one `fstream` for random reads?
+- What does SWMR guarantee about the value returned by `get` during a `put`?
+- How would you allow reads during compaction without a long exclusive lock?
+
+---
+
 ## Decision log
 
 | Phase | Decision | Rationale |
@@ -296,3 +345,5 @@ Disk grows without bound even if the live key set is small.
 | 3 | Tail truncate vs mid-file fail | Availability for crash tails; safety for deep damage |
 | 4 | Manual compact, new file + atomic replace | Crash-safe GC without LSM complexity |
 | 4 | Live set from hash index | O(live) rewrite; tombstones dropped |
+| 5 | `shared_mutex` SWMR | Multiple concurrent gets; exclusive mutations |
+| 5 | Positioned `read_path_region` for values | Avoid shared fstream cursor races |

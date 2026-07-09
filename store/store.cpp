@@ -4,6 +4,7 @@
 #include "ekv/record.hpp"
 
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,27 +26,33 @@ fs::path old_path_for(const fs::path& dir) { return dir / kCompactOldName; }
 
 Store::~Store() { close(); }
 
-Store::Store(Store&& other) noexcept
-    : open_(other.open_),
-      path_(std::move(other.path_)),
-      index_(std::move(other.index_)),
-      log_(std::move(other.log_)) {
+Store::Store(Store&& other) noexcept {
+  std::unique_lock lock(other.mu_);
+  open_ = other.open_;
+  path_ = std::move(other.path_);
+  index_ = std::move(other.index_);
+  log_ = std::move(other.log_);
   other.open_ = false;
 }
 
 Store& Store::operator=(Store&& other) noexcept {
-  if (this != &other) {
-    close();
-    open_ = other.open_;
-    path_ = std::move(other.path_);
-    index_ = std::move(other.index_);
-    log_ = std::move(other.log_);
-    other.open_ = false;
+  if (this == &other) {
+    return *this;
   }
+  std::unique_lock lk_this(mu_, std::defer_lock);
+  std::unique_lock lk_other(other.mu_, std::defer_lock);
+  std::lock(lk_this, lk_other);
+
+  close_unlocked();
+  open_ = other.open_;
+  path_ = std::move(other.path_);
+  index_ = std::move(other.index_);
+  log_ = std::move(other.log_);
+  other.open_ = false;
   return *this;
 }
 
-void Store::ensure_open() const {
+void Store::ensure_open_unlocked() const {
   if (!open_) {
     throw Error(ErrorCode::NotOpen, "store is not open");
   }
@@ -70,14 +77,10 @@ void Store::cleanup_compaction_artifacts(const fs::path& dir) {
 
   std::error_code ec;
 
-  // Crash during compact after new file was fully written but before replace:
-  // keep the live log, drop the temp.
   if (fs::exists(compactp, ec) && fs::exists(logp, ec)) {
     fs::remove(compactp, ec);
   }
 
-  // Crash after removing/renaming away the live log but before installing
-  // the compact file as ekv.log — promote the compact file.
   if (fs::exists(compactp, ec) && !fs::exists(logp, ec)) {
     fs::rename(compactp, logp, ec);
     if (ec) {
@@ -88,13 +91,13 @@ void Store::cleanup_compaction_artifacts(const fs::path& dir) {
     sync_directory(dir);
   }
 
-  // Leftover backup from replace path.
   if (fs::exists(oldp, ec)) {
     fs::remove(oldp, ec);
   }
 }
 
 void Store::open(const fs::path& path) {
+  std::unique_lock lock(mu_);
   if (open_) {
     throw Error(ErrorCode::AlreadyOpen, "store is already open");
   }
@@ -128,7 +131,7 @@ void Store::open(const fs::path& path) {
   open_ = true;
 }
 
-void Store::close() noexcept {
+void Store::close_unlocked() noexcept {
   if (!open_) {
     return;
   }
@@ -138,8 +141,24 @@ void Store::close() noexcept {
   open_ = false;
 }
 
+void Store::close() noexcept {
+  std::unique_lock lock(mu_);
+  close_unlocked();
+}
+
+bool Store::is_open() const noexcept {
+  std::shared_lock lock(mu_);
+  return open_;
+}
+
+std::filesystem::path Store::path() const {
+  std::shared_lock lock(mu_);
+  return path_;
+}
+
 void Store::put(std::string_view key, std::string_view value) {
-  ensure_open();
+  std::unique_lock lock(mu_);
+  ensure_open_unlocked();
   if (key.empty()) {
     throw Error(ErrorCode::InvalidArgument, "key must not be empty");
   }
@@ -148,7 +167,8 @@ void Store::put(std::string_view key, std::string_view value) {
 }
 
 std::optional<std::string> Store::get(std::string_view key) const {
-  ensure_open();
+  std::shared_lock lock(mu_);
+  ensure_open_unlocked();
   if (key.empty()) {
     throw Error(ErrorCode::InvalidArgument, "key must not be empty");
   }
@@ -160,7 +180,8 @@ std::optional<std::string> Store::get(std::string_view key) const {
 }
 
 bool Store::Delete(std::string_view key) {
-  ensure_open();
+  std::unique_lock lock(mu_);
+  ensure_open_unlocked();
   if (key.empty()) {
     throw Error(ErrorCode::InvalidArgument, "key must not be empty");
   }
@@ -172,7 +193,8 @@ bool Store::Delete(std::string_view key) {
 }
 
 CompactStats Store::compact() {
-  ensure_open();
+  std::unique_lock lock(mu_);
+  ensure_open_unlocked();
 
   CompactStats stats;
   stats.bytes_before = log_.size_bytes();
@@ -186,8 +208,6 @@ CompactStats Store::compact() {
   fs::remove(compactp, ec);
   fs::remove(oldp, ec);
 
-  // Snapshot live keys so we can close/reopen the primary log safely.
-  // Values are read from the still-open log before we cut over.
   struct Live {
     std::string key;
     std::string value;
@@ -207,21 +227,17 @@ CompactStats Store::compact() {
     for (const auto& row : live) {
       (void)fresh.append_put(row.key, row.value);
     }
-    // Final durable point before install (each put already synced; belt+suspenders).
     fresh.sync();
     stats.bytes_after = fresh.size_bytes();
     fresh.close();
   }
 
-  // Install: release handle on the live log, then replace the path.
   log_.close();
 
   try {
-    // Keep a backup until the new file is installed (helps odd failure modes).
     if (fs::exists(logp, ec)) {
       fs::rename(logp, oldp, ec);
       if (ec) {
-        // Windows may fail rename if something still holds the file; try remove.
         fs::remove(logp, ec);
         if (ec) {
           throw Error(ErrorCode::IoError,
@@ -237,7 +253,6 @@ CompactStats Store::compact() {
     }
     sync_directory(path_);
   } catch (...) {
-    // Best-effort: try to reopen whatever log remains so the Store is usable.
     try {
       if (!fs::exists(logp, ec) && fs::exists(oldp, ec)) {
         fs::rename(oldp, logp, ec);
@@ -247,7 +262,6 @@ CompactStats Store::compact() {
         rebuild_index_from_log();
       }
     } catch (...) {
-      // Leave closed; rethrow original.
     }
     open_ = log_.is_open();
     throw;
@@ -261,17 +275,20 @@ CompactStats Store::compact() {
 }
 
 std::size_t Store::size() const {
-  ensure_open();
+  std::shared_lock lock(mu_);
+  ensure_open_unlocked();
   return index_.size();
 }
 
 bool Store::empty() const {
-  ensure_open();
+  std::shared_lock lock(mu_);
+  ensure_open_unlocked();
   return index_.empty();
 }
 
 std::uint64_t Store::log_size_bytes() const {
-  ensure_open();
+  std::shared_lock lock(mu_);
+  ensure_open_unlocked();
   return log_.size_bytes();
 }
 

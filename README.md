@@ -16,7 +16,7 @@ persistence, in-memory indexing, and careful durability semantics.
 | 2     | Append-only log + binary records           | Done    |
 | 3     | CRC32, recovery, fsync, crash tests        | Done    |
 | 4     | Compaction (write → fsync → atomic rename) | Done    |
-| 5     | Single writer / multi-reader + stress      | Planned |
+| 5     | Single writer / multi-reader + stress      | Done    |
 | 6     | Config, ARM/QEMU, benchmarks               | Planned |
 
 **Phase 3 note:** Log format **v2** — each record ends with CRC-32; every append
@@ -27,6 +27,10 @@ the last record are truncated on open; mid-file CRC failures raise
 **Phase 4 note:** `Store::compact()` rewrites live keys to `ekv.log.compact`,
 durably syncs, then atomically replaces `ekv.log` (tombstones and old versions
 dropped). Interrupted compact temps are cleaned or promoted on `open`.
+
+**Phase 5 note:** `std::shared_mutex` — concurrent `get`/`size` (shared), exclusive
+`put`/`Delete`/`compact`/`open`/`close`. Value reads use positioned OS I/O so
+readers do not share the append stream cursor.
 
 ## Requirements
 

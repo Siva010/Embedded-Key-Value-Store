@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
+#include <string>
 
 namespace ekv {
 
@@ -18,5 +20,11 @@ void sync_directory(const std::filesystem::path& dir);
 // Both paths must be on the same filesystem. Throws Error(IoError) on failure.
 void replace_file(const std::filesystem::path& from,
                   const std::filesystem::path& to);
+
+// Positioned read that does not share a stream cursor (safe for concurrent
+// readers under Store's shared_mutex). Throws Error(IoError) on failure.
+[[nodiscard]] std::string read_path_region(const std::filesystem::path& path,
+                                           std::uint64_t offset,
+                                           std::uint32_t length);
 
 }  // namespace ekv

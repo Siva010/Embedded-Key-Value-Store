@@ -358,18 +358,9 @@ std::string AppendLog::read_value(RecordLocator locator) const {
   if (locator.value_size == 0) {
     return {};
   }
-
-  std::string out(locator.value_size, '\0');
-  file_.clear();
-  file_.seekg(static_cast<std::streamoff>(locator.value_offset), std::ios::beg);
-  if (!file_) {
-    throw_io("failed to seek log for read");
-  }
-  file_.read(out.data(), static_cast<std::streamsize>(locator.value_size));
-  if (file_.gcount() != static_cast<std::streamsize>(locator.value_size)) {
-    throw_io("short read while loading value from log");
-  }
-  return out;
+  // Positioned OS read — does not move the writer fstream cursor, so concurrent
+  // readers under Store::shared_mutex are safe w.r.t. the append stream.
+  return read_path_region(path_, locator.value_offset, locator.value_size);
 }
 
 void AppendLog::replay(const ReplayFn& on_record) const {
