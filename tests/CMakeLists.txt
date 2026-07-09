@@ -32,3 +32,8 @@ add_executable(ekv_options_test options_test.cpp)
 target_link_libraries(ekv_options_test PRIVATE ekv::ekv)
 ekv_apply_warnings(ekv_options_test)
 add_test(NAME ekv_options_test COMMAND ekv_options_test)
+
+add_executable(ekv_auto_compact_test auto_compact_test.cpp)
+target_link_libraries(ekv_auto_compact_test PRIVATE ekv::ekv)
+ekv_apply_warnings(ekv_auto_compact_test)
+add_test(NAME ekv_auto_compact_test COMMAND ekv_auto_compact_test)

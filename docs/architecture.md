@@ -392,3 +392,5 @@ and validate that the engine is not x86-only.
 | 6 | `Options.sync_mode` Full/Flush/None | Tunable durability vs throughput |
 | 6 | `ekv_bench` microbench | Measure put/get/overwrite/open cost |
 | 6 | aarch64 toolchain + QEMU notes | Portable embedded validation path |
+| 7 | Transparent hash index | Avoid temp `std::string` on get/erase |
+| 7 | `stats()` + auto-compact ratio | Observe/reclaim space amplification |

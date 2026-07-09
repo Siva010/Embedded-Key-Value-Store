@@ -3,6 +3,7 @@
 #include "ekv/os_sync.hpp"
 #include "ekv/record.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -24,6 +25,11 @@ fs::path old_path_for(const fs::path& dir) { return dir / kCompactOldName; }
 
 }  // namespace
 
+std::uint64_t Store::live_record_bytes(std::size_t key_len,
+                                       std::uint32_t value_len) noexcept {
+  return record_total_size(static_cast<std::uint32_t>(key_len), value_len);
+}
+
 Store::~Store() { close(); }
 
 Store::Store(Store&& other) noexcept {
@@ -33,7 +39,9 @@ Store::Store(Store&& other) noexcept {
   path_ = std::move(other.path_);
   index_ = std::move(other.index_);
   log_ = std::move(other.log_);
+  live_bytes_ = other.live_bytes_;
   other.open_ = false;
+  other.live_bytes_ = 0;
 }
 
 Store& Store::operator=(Store&& other) noexcept {
@@ -50,13 +58,23 @@ Store& Store::operator=(Store&& other) noexcept {
   path_ = std::move(other.path_);
   index_ = std::move(other.index_);
   log_ = std::move(other.log_);
+  live_bytes_ = other.live_bytes_;
   other.open_ = false;
+  other.live_bytes_ = 0;
   return *this;
 }
 
 void Store::ensure_open_unlocked() const {
   if (!open_) {
     throw Error(ErrorCode::NotOpen, "store is not open");
+  }
+}
+
+void Store::recompute_live_bytes() {
+  live_bytes_ = 0;
+  for (const auto& entry : index_) {
+    live_bytes_ +=
+        live_record_bytes(entry.first.size(), entry.second.value_size);
   }
 }
 
@@ -70,6 +88,7 @@ void Store::rebuild_index_from_log() {
       index_.erase(key);
     }
   });
+  recompute_live_bytes();
 }
 
 void Store::cleanup_compaction_artifacts(const fs::path& dir) {
@@ -112,6 +131,10 @@ void Store::open_unlocked(const fs::path& path, Options options) {
   if (path.empty()) {
     throw Error(ErrorCode::InvalidArgument, "data path must not be empty");
   }
+  if (options.auto_compact_ratio < 0.0) {
+    throw Error(ErrorCode::InvalidArgument,
+                "auto_compact_ratio must be >= 0");
+  }
 
   std::error_code ec;
   fs::create_directories(path, ec);
@@ -134,6 +157,7 @@ void Store::open_unlocked(const fs::path& path, Options options) {
     log_.close();
     path_.clear();
     index_.clear();
+    live_bytes_ = 0;
     options_ = Options{};
     throw;
   }
@@ -149,6 +173,7 @@ void Store::close_unlocked() noexcept {
   index_.clear();
   path_.clear();
   options_ = Options{};
+  live_bytes_ = 0;
   open_ = false;
 }
 
@@ -178,8 +203,19 @@ void Store::put(std::string_view key, std::string_view value) {
   if (key.empty()) {
     throw Error(ErrorCode::InvalidArgument, "key must not be empty");
   }
+
+  if (const auto old = index_.get(key)) {
+    const auto sub =
+        live_record_bytes(key.size(), old->value_size);
+    live_bytes_ = (live_bytes_ > sub) ? (live_bytes_ - sub) : 0;
+  }
+
   const RecordLocator loc = log_.append_put(key, value);
   index_.put(std::string(key), loc);
+  live_bytes_ +=
+      live_record_bytes(key.size(), static_cast<std::uint32_t>(value.size()));
+
+  maybe_auto_compact_unlocked();
 }
 
 std::optional<std::string> Store::get(std::string_view key) const {
@@ -201,17 +237,43 @@ bool Store::Delete(std::string_view key) {
   if (key.empty()) {
     throw Error(ErrorCode::InvalidArgument, "key must not be empty");
   }
-  if (!index_.contains(key)) {
+  const auto old = index_.get(key);
+  if (!old.has_value()) {
     return false;
   }
+
+  const auto sub = live_record_bytes(key.size(), old->value_size);
+  live_bytes_ = (live_bytes_ > sub) ? (live_bytes_ - sub) : 0;
+
   log_.append_delete(key);
-  return index_.erase(key);
+  const bool erased = index_.erase(key);
+  maybe_auto_compact_unlocked();
+  return erased;
+}
+
+void Store::maybe_auto_compact_unlocked() {
+  if (options_.auto_compact_ratio <= 0.0) {
+    return;
+  }
+  const std::uint64_t log_bytes = log_.size_bytes();
+  if (log_bytes < options_.auto_compact_min_bytes) {
+    return;
+  }
+  const std::uint64_t denom = (std::max)(live_bytes_, std::uint64_t{1});
+  const double amp =
+      static_cast<double>(log_bytes) / static_cast<double>(denom);
+  if (amp >= options_.auto_compact_ratio) {
+    (void)compact_unlocked();
+  }
 }
 
 CompactStats Store::compact() {
   std::unique_lock lock(mu_);
   ensure_open_unlocked();
+  return compact_unlocked();
+}
 
+CompactStats Store::compact_unlocked() {
   CompactStats stats;
   stats.bytes_before = log_.size_bytes();
   stats.live_keys = index_.size();
@@ -243,7 +305,6 @@ CompactStats Store::compact() {
     for (const auto& row : live) {
       (void)fresh.append_put(row.key, row.value);
     }
-    // Explicit full durable point before install regardless of SyncMode.
     fresh.sync();
     stats.bytes_after = fresh.size_bytes();
     fresh.close();
@@ -307,6 +368,19 @@ std::uint64_t Store::log_size_bytes() const {
   std::shared_lock lock(mu_);
   ensure_open_unlocked();
   return log_.size_bytes();
+}
+
+StoreStats Store::stats() const {
+  std::shared_lock lock(mu_);
+  ensure_open_unlocked();
+  StoreStats s;
+  s.live_keys = index_.size();
+  s.log_bytes = log_.size_bytes();
+  s.live_bytes = live_bytes_;
+  const std::uint64_t denom = (std::max)(live_bytes_, std::uint64_t{1});
+  s.space_amp =
+      static_cast<double>(s.log_bytes) / static_cast<double>(denom);
+  return s;
 }
 
 }  // namespace ekv

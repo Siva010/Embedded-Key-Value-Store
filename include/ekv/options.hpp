@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string_view>
 
 namespace ekv {
@@ -29,10 +30,18 @@ enum class SyncMode {
   return "unknown";
 }
 
-// Options fixed at Store::open (Phase 6).
+// Options fixed at Store::open.
 struct Options {
   // Per-append durability. Prefer Full for production-like runs.
   SyncMode sync_mode = SyncMode::Full;
+
+  // Automatic compaction when log_bytes / live_bytes >= this ratio.
+  // Set to 0 to disable (default). Example: 4.0 rewrites when ≥75% is garbage.
+  double auto_compact_ratio = 0.0;
+
+  // Do not auto-compact until the log is at least this large (bytes).
+  // Avoids rewriting tiny logs. Ignored when auto_compact_ratio == 0.
+  std::uint64_t auto_compact_min_bytes = 1024 * 1024;  // 1 MiB
 };
 
 }  // namespace ekv

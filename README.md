@@ -36,6 +36,10 @@ readers do not share the append stream cursor.
 `open`. Benchmarks: `build/bench/ekv_bench`. ARM cross + QEMU: see
 `docs/arm_qemu.md` and `cmake/toolchains/aarch64-linux-gnu.cmake`.
 
+**Polish:** transparent `string_view` index lookups; `Store::stats()` (live/log
+bytes, space amp); optional `auto_compact_ratio` / `auto_compact_min_bytes`.
+Interview prompts: `docs/interview_prep.md`.
+
 ## Requirements
 
 - CMake ≥ 3.16
@@ -82,7 +86,8 @@ if (auto v = db.get("key")) {
   // *v == "value"
 }
 db.Delete("key");
-db.compact();             // reclaim garbage
+db.compact();             // reclaim garbage (or set auto_compact_ratio)
+auto st = db.stats();     // live_keys, log_bytes, live_bytes, space_amp
 db.close();
 ```
 
